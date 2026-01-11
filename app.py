@@ -59,20 +59,28 @@ def health():
 
 TIMEOUT_SECONDS = int(os.getenv("INVOKE_TIMEOUT", "60"))
 
+agent = Agent(
+    name="intake-agent",
+    instructions=SYSTEM_RULES,
+    model="openai:gpt-4o",   # ojo: provider:model
+)
+agent_lock = asyncio.Lock()
+
 @app.post("/invoke")
 async def invoke(req: InvokeReq, x_api_key: str | None = Header(default=None)):
     if API_KEY and (x_api_key or "").strip() != API_KEY:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
-    agent = Agent(
-        name="intake-agent",
-        instructions=SYSTEM_RULES,
-        model="openai:gpt-5.2",   # ojo: provider:model
+    try:
+        async with agent_lock:
+            result = await asyncio.wait_for(agent.arun(input=req.message), timeout=TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        raise HTTPException(
+        status_code=504,
+        detail={"error": "timeout", "after_seconds": TIMEOUT_SECONDS}
     )
 
-    try:
-        result = await asyncio.wait_for(agent.arun(input=req.message), timeout=TIMEOUT_SECONDS)
-    except asyncio.TimeoutError:
-        raise HTTPException(status_code=504, detail=f"Timeout after {TIMEOUT_SECONDS}s")
-
-    return ensure_json(result.content)
+    parsed = ensure_json(result.content)
+    if "error" in parsed:
+        raise HTTPException(status_code=502, detail=parsed)
+    return parsed
