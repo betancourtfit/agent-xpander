@@ -1,0 +1,9 @@
+python-dotenv
+agno
+xpander-sdk[agno]
+openai
+anthropic
+aioboto3
+mcp
+fastapi
+uvicorn[standard]

@@ -1,0 +1,76 @@
+from enum import Enum
+from typing import Any, List, Optional
+
+from pydantic import Field
+from xpander_sdk.models.shared import XPanderSharedModel
+from datetime import datetime
+
+class TaskStatus(str, Enum):
+    READY = "ready"
+    RUNNING = "running"
+    FAILED = "failed"
+    DONE = "done"
+
+
+class Task(XPanderSharedModel):
+    id: str = Field(..., description="task id")
+    title: str = Field(..., description="Short task title, max 120 chars")
+    description: Optional[str] = Field(None, description="Optional short step description, max 120 chars")
+    status: TaskStatus = Field(..., description="Task status")
+    created_at: datetime = Field(..., description="Creation timestamp (ISO 8601)")
+    started_at: Optional[datetime] = Field(None, description="Start timestamp (ISO 8601)")
+    finished_at: Optional[datetime] = Field(None, description="Finish timestamp (ISO 8601)")
+    error: Optional[str] = Field(None, description="Error message if failed")
+    parent_id: Optional[str] = Field(None, description="Parent task id if related")
+
+class ToolCallRequestReasoning(XPanderSharedModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    
+class ToolCallRequest(XPanderSharedModel):
+    request_id: str
+    operation_id: str
+    tool_call_id: Optional[str] = None
+    graph_node_id: Optional[str] = None
+    tool_name: Optional[str] = None
+    payload: Optional[Any] = None
+    reasoning: Optional[ToolCallRequestReasoning] = None
+
+
+class ToolCallResult(ToolCallRequest):
+    operation_id: str
+    tool_call_id: Optional[str] = None
+    tool_name: Optional[str] = None
+    payload: Optional[Any] = None
+    result: Optional[Any] = None
+    is_error: Optional[bool] = False
+
+
+class TaskUpdateEventType(str, Enum):
+    # tasks
+    TaskCreated = "task_created"
+    TaskUpdated = "task_updated"
+    TaskFinished = "task_finished"
+    
+    # streaming
+    Chunk = "chunk"
+    
+    # MCP Auth
+    AuthEvent = "auth_event"
+
+    # tool calls
+    ToolCallRequest = "tool_call_request"
+    ToolCallResult = "tool_call_result"
+
+    # multi agents
+    SubAgentTrigger = "sub_agent_trigger"
+    
+    # reasoning
+    Think = "think"
+    Analyze = "analyze"
+    
+    # deep planning
+    PlanUpdated = "plan_updated"
+    
+    # task compactization
+    TaskCompactization = "task_compactization"
