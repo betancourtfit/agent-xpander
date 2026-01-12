@@ -65,10 +65,9 @@ def _ensure_json_or_502(text: str) -> dict:
 
 
 @app.post("/invoke")
-async def invoke(
-    req: InvokeReq,
-    x_api_key: str | None = Header(default=None),
-):
+async def invoke(req: InvokeReq, x_api_key: str | None = Header(default=None)):
+    return {"ok": True, "echo": req.message}
+
     # 1) Auth
     if API_KEY and (x_api_key or "").strip() != API_KEY:
         raise HTTPException(status_code=401, detail="Unauthorized")
