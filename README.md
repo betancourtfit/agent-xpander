@@ -1,90 +1,201 @@
-# Agno Framework Template
+from pathlib import Path
 
-This template provides a foundation for building AI agents using the [Agno framework](https://github.com/xpander-ai/agno) integrated with the xpander.ai platform.
+content = """# Intake Agent – Xpander + Local Compute
 
-## Features
+## Descripción
+Este proyecto implementa un **AI Intake Agent** para consultas de automatización y tecnología, combinando:
 
-- **Agno Framework Integration**: Built on the powerful Agno AI agent framework
-- **Thinking Tools**: Includes step-by-step reasoning capabilities
-- **Dual Mode Support**: Works both standalone and with Xpander backend
-- **State Management**: Maintains conversation history and state
-- **Async Operations**: Built for high-performance async execution
+- **Cómputo en tu propio servidor** (FastAPI + Docker).
+- **Configuración dinámica desde Xpander UI** (sin redeploy).
+- **Clasificación determinística de intención y scoring** previa al LLM.
+- **Contrato de salida JSON estable**, tolerante a variaciones del modelo.
 
-## Files Structure
+El objetivo es recibir mensajes vía HTTP, clasificarlos, delegar el razonamiento al agente configurado en Xpander y devolver una respuesta limpia y usable por sistemas downstream (CRM, Slack, Notion, etc.).
 
-- `xpander_handler.py` - WebSocket event handler for Xpander platform
-- `requirements.txt` - Python dependencies
-- `Dockerfile` - Container deployment configuration
-- `.env.example` - Template for environment variables
-- `.dockerignore` - Docker ignore file
+---
 
-## Getting Started
+## Arquitectura de alto nivel
 
-### Local Development
-
-1. **Install Dependencies**:
-
-   ```bash
-   python3 -m venv .venv
-   source .venv/bin/activate
-   make install
-   ```
-
-### Xpander Platform Integration
-
-1. **Initialize in your project**:
-
-   ```bash
-   npm install -g xpander-cli
-   xpander login
-   xpander agent new
-   xpander agent init
-   ```
-
-2. **Run the agent**
-
-   ```bash
-   python xpander_handler.py
-   ```
-
-3. **Test it locally**
-
-   ```bash
-   docker build . -t my-agent && docker run my-agent
-   # add --env-file .env to load the secrets
-   # use the cli to sync the .env file to xpander.ai with xpander secrets-sync
-   ```
-
-4. **Deploy to Xpander**:
-
-   ```bash
-   xpander deploy
-   ```
-
-### Environment Variables
-
-Create a `.env` file for local development based on `.env.example`:
-
-```env
-XPANDER_API_KEY="{YOUR_API_KEY}"
-XPANDER_ORGANIZATION_ID="{YOUR_ORGANIZATION_ID}"
-XPANDER_AGENT_ID="{YOUR_XPANDER_AGENT_ID}"
-ANTHROPIC_API_KEY="{YOUR_ANTHROPIC_API_KEY_IF_USING_ANTHROPIC}"
-OPENAI_API_KEY="{YOUR_OPENAI_API_KEY_IF_USING_OPENAI}"
+```
+Cliente HTTP
+   |
+   v
+FastAPI (app.py)
+   |
+   |-- intent_classifier (determinístico)
+   |
+   |-- llamada HTTP -> Xpander API
+   |        |
+   |        v
+   |   Agente configurado en Xpander UI
+   |
+   v
+Normalización + validación JSON
+   |
+   v
+Respuesta HTTP + headers de intent
 ```
 
-## Dependencies
+---
 
-- **agno[all]**: Core AI agent framework with all features
-- **xpander-sdk[agno]**: Xpander platform SDK with Agno integration
-- **openai**: OpenAI API integration
-- **anthropic**: Anthropic API integration
-- **mcp**: Model Context Protocol support
-- **python-dotenv**: Environment variable management
+## Componentes principales
 
-## Notes
+### 1. `app.py`
+Responsable de:
+- Exponer la API HTTP (`/invoke`, `/health`).
+- Autenticación por API Key.
+- Clasificación de intención y scoring.
+- Invocar al agente de Xpander vía API.
+- Extraer y normalizar el resultado del agente.
+- Devolver el JSON final + headers.
 
-- Ensure you have Python 3.12+ installed
-- The template supports multiple AI providers (OpenAI, Anthropic)
-- Uses Alpine-based Docker image for lightweight deployment
-- Includes MCP (Model Context Protocol) support
+👉 **No contiene lógica de negocio del agente**.
+
+---
+
+### 2. `xpander_handler.py`
+Responsable de:
+- Ejecutarse **solo cuando usás Xpander Dev / Workers**.
+- Tomar la configuración del agente desde la UI.
+- Inyectar contexto interno (intent, score).
+- Ejecutar el LLM.
+- Asegurar salida JSON válida.
+
+👉 **No se usa en el flujo HTTP local**, pero es el mismo agente lógico.
+
+---
+
+### 3. `intent_classifier.py`
+- Clasificador determinístico (sin LLM).
+- Extrae:
+  - `intent.id`
+  - `intent.label`
+  - `score` (0–100)
+  - `reasons`
+
+Se usa para:
+- Headers HTTP.
+- Ruteo futuro.
+- Priorización comercial.
+
+---
+
+## Contrato de salida (JSON)
+
+El agente devuelve **un único objeto JSON** con esta forma (flexible, no estricta):
+
+```json
+{
+  "summary": "string",
+  "assumptions": ["string"],
+  "missing_questions": ["string"],
+  "mvp_plan": [
+    { "step": "string", "effort": "Bajo|Medio|Alto|1h|2d" }
+  ],
+  "risks": ["string"]
+}
+```
+
+Campos adicionales pueden existir internamente, pero **la API solo expone este bloque**.
+
+---
+
+## Headers de respuesta
+
+```http
+x-intent-id: lead_automation
+x-intent-score: 98
+x-intent-reasons: ["has_budget", "has_urgency", ...]
+```
+
+---
+
+## Variables de entorno
+
+```env
+# Seguridad
+INTAKE_API_KEY=LEVONS_INTERNAL
+
+# Xpander
+XPANDER_API_KEY=xxxxxxxx
+XPANDER_AGENT_ID=cd6c4b5c-8005-4c44-9e70-5831cefa608b
+XPANDER_BASE_URL=https://api.xpander.ai
+XPANDER_INVOKE_PATH=/v1/agents/{AGENT_ID}/invoke
+
+# Runtime
+INVOKE_TIMEOUT=60
+```
+
+---
+
+## Ejecución local
+
+### 1. Crear entorno
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+### 2. Levantar API
+```bash
+uvicorn app:app --host 0.0.0.0 --port 8000
+```
+
+### 3. Probar
+```bash
+curl -s http://127.0.0.1:8000/invoke \\
+  -H "Content-Type: application/json" \\
+  -H "x-api-key: LEVONS_INTERNAL" \\
+  -d '{"message":"implementar n8n para mi empresa"}'
+```
+
+---
+
+## Docker
+
+```bash
+docker build -t intake-agent .
+docker run -p 8000:8000 --env-file .env intake-agent
+```
+
+---
+
+## Qué NO hace este proyecto (por diseño)
+
+- No persiste conversaciones.
+- No usa estado interno.
+- No depende del SDK de Xpander en runtime HTTP.
+- No fuerza strict JSON con retries agresivos (se prioriza resiliencia).
+
+---
+
+## Evoluciones naturales
+
+- Ruteo por intent (agents especializados).
+- Webhooks post-respuesta (CRM / Slack).
+- Score → pipeline comercial.
+- Versionado de prompts.
+- Multi-tenant (org_id).
+
+---
+
+## Filosofía
+
+> **Xpander define el “qué” (inteligencia).  
+> Tu servidor controla el “cómo” (cómputo, seguridad, costos).**
+
+---
+
+## Estado actual
+
+✅ Producción funcional  
+✅ Cloudflare + Docker  
+✅ Configurable desde UI sin redeploy  
+✅ Resiliente a salidas inválidas del modelo  
+"""
+
+path = Path("/mnt/data/README.md")
+path.write_text(content, encoding="utf-8")
+
+path
