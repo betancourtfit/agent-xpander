@@ -1,40 +1,51 @@
 import os
 import json
+import asyncio
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI, Header, HTTPException
-import asyncio
+from fastapi import FastAPI, Header, HTTPException, Response
 from pydantic import BaseModel
+
+from intent_classifier import classify_intent_and_score
 from agno.agent import Agent
 
+# =====================
+# Config
+# =====================
 API_KEY = os.getenv("INTAKE_API_KEY", "").strip()
+TIMEOUT_SECONDS = int(os.getenv("INVOKE_TIMEOUT", "60"))
 
-OUTPUT_SCHEMA_HINT = {
-    "summary": "string",
-    "assumptions": ["string"],
-    "missing_questions": ["string"],
-    "mvp_plan": [{"step": "string", "effort": "string"}],
-    "risks": ["string"],
-}
+# =====================
+# App
+# =====================
+app = FastAPI()
 
-SYSTEM_RULES = f"""
-You are an expert automation + AI consulting intake agent.
-Return ONLY valid JSON. No markdown. No extra text.
 
-The JSON MUST match this shape:
-{json.dumps(OUTPUT_SCHEMA_HINT, ensure_ascii=False)}
+class InvokeReq(BaseModel):
+    message: str
 
-Rules:
-- Keep Spanish output.
-- missing_questions: max 7 items.
-- mvp_plan: 3 to 8 steps, each with step + effort (e.g. "1h", "4h", "1d").
-- If info is missing, add it to missing_questions (do not invent).
-""".strip()
 
-def ensure_json(text: str) -> dict:
+@app.get("/health")
+def health():
+    return {"ok": True}
+
+
+# =====================
+# Local execution agent
+# (solo para DEV / fallback)
+# =====================
+agent = Agent(
+    name="intake-agent",
+    instructions=os.getenv("LOCAL_AGENT_INSTRUCTIONS", "").strip() or None,
+)
+agent_lock = asyncio.Lock()
+
+
+def _ensure_json_or_502(text: str) -> dict:
     if not text:
-        return {"error": "empty_response"}
+        raise HTTPException(status_code=502, detail="empty_response")
+
     text = text.strip()
     try:
         return json.loads(text)
@@ -43,44 +54,54 @@ def ensure_json(text: str) -> dict:
         end = text.rfind("}")
         if start != -1 and end != -1 and end > start:
             try:
-                return json.loads(text[start:end+1])
+                return json.loads(text[start:end + 1])
             except Exception:
                 pass
-        return {"error": "non_json_response", "raw": text[:2000]}
 
-class InvokeReq(BaseModel):
-    message: str
+    raise HTTPException(
+        status_code=502,
+        detail={"error": "non_json_response", "raw": text[:2000]},
+    )
 
-app = FastAPI()
-
-@app.get("/health")
-def health():
-    return {"ok": True}
-
-TIMEOUT_SECONDS = int(os.getenv("INVOKE_TIMEOUT", "60"))
-
-agent = Agent(
-    name="intake-agent",
-    instructions=SYSTEM_RULES,
-    model="openai:gpt-4o",   # ojo: provider:model
-)
-agent_lock = asyncio.Lock()
 
 @app.post("/invoke")
-async def invoke(req: InvokeReq, x_api_key: str | None = Header(default=None)):
+async def invoke(
+    req: InvokeReq,
+    x_api_key: str | None = Header(default=None),
+):
+    # 1) Auth
     if API_KEY and (x_api_key or "").strip() != API_KEY:
         raise HTTPException(status_code=401, detail="Unauthorized")
 
+    # 2) Intent classification (determinístico)
+    intent_pack = classify_intent_and_score(req.message)
+
+    # 3) Ejecutar agente (local DEV mode)
     try:
         async with agent_lock:
-            result = await asyncio.wait_for(agent.arun(input=req.message), timeout=TIMEOUT_SECONDS)
+            result = await asyncio.wait_for(
+                agent.arun(input=req.message),
+                timeout=TIMEOUT_SECONDS,
+            )
     except asyncio.TimeoutError:
         raise HTTPException(
-        status_code=504,
-        detail={"error": "timeout", "after_seconds": TIMEOUT_SECONDS}
+            status_code=504,
+            detail={"error": "timeout", "after_seconds": TIMEOUT_SECONDS},
+        )
+
+    # 4) JSON estricto
+    parsed = _ensure_json_or_502(result.content)
+
+    # 5) Response + headers
+    resp = Response(
+        content=json.dumps(parsed, ensure_ascii=False),
+        media_type="application/json",
+    )
+    resp.headers["x-intent-id"] = str((intent_pack.get("intent") or {}).get("id", ""))
+    resp.headers["x-intent-score"] = str(intent_pack.get("score", ""))
+    resp.headers["x-intent-reasons"] = json.dumps(
+        intent_pack.get("reasons", []),
+        ensure_ascii=False,
     )
 
-    parsed = ensure_json(result.content)
-    if "error" in parsed:
-        raise HTTPException(status_code=502, detail=parsed)
-    return parsed
+    return resp
